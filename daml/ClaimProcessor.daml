@@ -1,0 +1,117 @@
+-- |
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+--
+
+module ClaimProcessor where
+
+import DA.Assert ((===))
+import DA.Date (toDateUTC)
+import DA.Optional (Optional(..))
+import DA.Time (Time, getTime)
+import OracleEvent (OracleEvent(..))
+import Policy (ComparisonOperator(..), ParametricThreshold(..), Policy(..))
+
+-- | Represents the final, settled state of a claim after a parametric trigger.
+-- This contract is created when an insurance policy pays out automatically.
+template PaidClaim
+  with
+    insurer : Party
+      -- ^ The insurance company that paid the claim.
+    insured : Party
+      -- ^ The policyholder who received the payout.
+    policyId : Text
+      -- ^ The unique identifier of the original policy.
+    payoutAmount : Decimal
+      -- ^ The amount paid out.
+    triggeringEvent : OracleEvent
+      -- ^ The oracle event data that triggered the claim.
+    payoutTimestamp : Time
+      -- ^ The UTC timestamp when the payout was processed.
+  where
+    signatory insurer, insured
+    observer insurer, insured
+
+-- | An automated processor that links an active insurance policy to an oracle feed.
+-- It listens for oracle events and automatically triggers a payout if the
+-- policy's parametric threshold is breached.
+template ClaimProcessor
+  with
+    insurer : Party
+      -- ^ The insurance company.
+    insured : Party
+      -- ^ The policyholder.
+    oracle : Party
+      -- ^ The trusted oracle party responsible for providing event data.
+    policyCid : ContractId Policy
+      -- ^ The contract ID of the active insurance policy being monitored.
+  where
+    signatory insurer, insured
+    observer oracle
+
+    key (insurer, insured, policyCid) : (Party, Party, ContractId Policy)
+    maintainer key._1
+
+    -- | Consumes an `OracleEvent` and processes it against the linked policy.
+    -- This is the core of the automated claim settlement. If the event data
+    - -- breaches the policy's threshold, a `PaidClaim` is created and the
+    -- policy is archived. If the policy expires without a claim, contracts are
+    -- cleaned up.
+    choice ProcessOracleEvent : Optional (ContractId PaidClaim)
+      with
+        eventCid: ContractId OracleEvent
+          -- ^ The contract ID of the oracle event to process.
+      controller oracle
+      do
+        policy <- fetch policyCid
+        event <- fetch eventCid
+
+        -- Validation: Ensure the event is from the correct oracle and for the correct policy.
+        policy.oracle === event.oracle
+        policy.policyId === event.eventId
+        oracle === event.oracle
+
+        -- The oracle event has been processed, so it can be archived.
+        archive eventCid
+
+        now <- getTime
+
+        if isThresholdBreached policy.parametricThreshold event.observedValue then do
+          -- THRESHOLD BREACHED: Process the payout.
+          -- Archive the active processor and policy as they are now settled.
+          archive self
+          archive policyCid
+
+          -- Create the final PaidClaim contract as a record of the settlement.
+          paidClaimCid <- create PaidClaim with
+            insurer = policy.insurer
+            insured = policy.insured
+            policyId = policy.policyId
+            payoutAmount = policy.payoutAmount
+            triggeringEvent = event
+            payoutTimestamp = now
+          return (Some paidClaimCid)
+
+        else if toDateUTC now > policy.endDate then do
+          -- POLICY EXPIRED: No threshold breach occurred before the policy's end date.
+          -- Clean up the active contracts.
+          archive self
+          archive policyCid
+          return None
+
+        else do
+          -- NO EVENT: The event did not breach the threshold and the policy has not expired.
+          -- The ClaimProcessor remains active to wait for subsequent events.
+          return None
+
+
+-- | Helper function to evaluate if an observed value from an oracle breaches
+-- a policy's parametric threshold.
+isThresholdBreached : ParametricThreshold -> Decimal -> Bool
+isThresholdBreached threshold observedValue =
+  case threshold.operator of
+    GREATER_THAN -> observedValue > threshold.thresholdValue
+    LESS_THAN -> observedValue < threshold.thresholdValue
+    EQUAL_TO -> observedValue == threshold.thresholdValue
+    GREATER_THAN_OR_EQUAL_TO -> observedValue >= threshold.thresholdValue
+    LESS_THAN_OR_EQUAL_TO -> observedValue <= threshold.thresholdValue
