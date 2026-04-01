@@ -1,0 +1,146 @@
+module Policy where
+
+import DA.Date
+import DA.Time
+import DA.Text (Text)
+import DA.Set (Set)
+import qualified DA.Set as Set
+
+-- | Defines the comparison operators for parametric triggers.
+data ComparisonOperator =
+    GreaterThan
+  | LessThan
+  | EqualTo
+  | GreaterThanOrEqualTo
+  | LessThanOrEqualTo
+  deriving (Eq, Show, Ord)
+
+-- | Represents the different types of parametric metrics that can be insured against.
+-- This ADT makes the system extensible to new types of parametric insurance.
+data Metric =
+    -- | For flight insurance, delay in minutes.
+    FlightDelayMinutes Int
+    -- | For earthquake insurance, magnitude on the Richter scale.
+  | EarthquakeMagnitude Decimal
+    -- | For agricultural insurance, rainfall in millimeters.
+  | RainfallMillimeters Decimal
+    -- | For weather derivatives, temperature in Celsius.
+  | TemperatureCelsius Decimal
+  deriving (Eq, Show, Ord)
+
+-- | Defines the specific trigger condition for a policy.
+data Threshold = Threshold
+  { metric : Metric      -- ^ The type of metric being measured (e.g., Rainfall).
+  , operator : ComparisonOperator -- ^ The comparison to perform (e.g., GreaterThan).
+  } deriving (Eq, Show, Ord)
+
+-- | The main insurance policy contract.
+-- This contract represents an active, unsettled parametric insurance policy
+-- between an insurer and a policyholder, with a designated oracle to provide event data.
+template InsurancePolicy
+  with
+    insurer : Party
+    policyholder : Party
+    oracle : Party
+    policyId : Text
+    description : Text
+    premium : Decimal
+    payout : Decimal
+    currency : Text
+    effectiveDate : Date
+    expirationDate : Date
+    threshold : Threshold
+  where
+    signatory insurer
+    observer policyholder, oracle
+
+    ensure premium > 0.0 && payout > 0.0 && expirationDate > effectiveDate
+      && insurer /= policyholder && oracle /= insurer && oracle /= policyholder
+
+    key (insurer, policyholder, policyId) : (Party, Party, Text)
+    maintainer key._1
+
+    -- | The oracle reports an event. If the event data breaches the policy's
+    -- | threshold, a `ClaimSettlement` contract is created and this policy
+    -- | is archived.
+    choice TriggerClaim : ContractId ClaimSettlement
+      with
+        eventData : Metric
+        eventTimestamp : Time
+      controller oracle
+      do
+        let eventDate = toDateUTC eventTimestamp
+        assertMsg "Event date must be within the policy period."
+          (eventDate >= effectiveDate && eventDate <= expirationDate)
+
+        let thresholdBreached = checkThreshold threshold eventData
+        assertMsg "The reported event data does not breach the policy threshold."
+          thresholdBreached
+
+        -- If the threshold is breached, create the settlement obligation
+        -- for the insurer and archive this active policy.
+        settlementCid <- create ClaimSettlement with
+          insurer
+          policyholder
+          payoutAmount = payout
+          currency
+          originalPolicyId = policyId
+          triggeringEvent = eventData
+          eventTimestamp
+        archive self
+        return settlementCid
+
+    -- | Allows either the insurer or policyholder to archive the policy once it
+    -- | has expired without a claim being triggered.
+    choice ExpirePolicy : ()
+      with
+        currentTime : Time
+      controller insurer, policyholder
+      do
+        let currentDate = toDateUTC currentTime
+        assertMsg ("Policy has not yet expired. Expiration date: " <> show expirationDate)
+          (currentDate > expirationDate)
+        archive self
+
+-- | A contract representing the insurer's obligation to pay a claim.
+-- This contract is created when an `InsurancePolicy` is triggered by the oracle.
+template ClaimSettlement
+  with
+    insurer : Party
+    policyholder : Party
+    payoutAmount : Decimal
+    currency : Text
+    originalPolicyId : Text
+    triggeringEvent : Metric
+    eventTimestamp : Time
+  where
+    signatory insurer
+    observer policyholder
+
+    -- | The insurer exercises this choice to signify that the off-ledger
+    -- | payment has been made and the obligation is fulfilled.
+    choice AcknowledgePayment : ()
+      controller insurer
+      do
+        archive self
+
+-- | Helper function to evaluate if the event data breaches the threshold.
+-- | It ensures that the metric types match before comparing values.
+checkThreshold : Threshold -> Metric -> Bool
+checkThreshold threshold eventData =
+  case (threshold.metric, eventData) of
+    (FlightDelayMinutes t, FlightDelayMinutes e) -> compareValues t e threshold.operator
+    (EarthquakeMagnitude t, EarthquakeMagnitude e) -> compareValues t e threshold.operator
+    (RainfallMillimeters t, RainfallMillimeters e) -> compareValues t e threshold.operator
+    (TemperatureCelsius t, TemperatureCelsius e) -> compareValues t e threshold.operator
+    _ -> False -- Mismatched metric types automatically fail the check.
+
+-- | Generic comparison helper that applies the ComparisonOperator.
+compareValues : Ord a => a -> a -> ComparisonOperator -> Bool
+compareValues thresholdValue eventValue operator =
+  case operator of
+    GreaterThan -> eventValue > thresholdValue
+    LessThan -> eventValue < thresholdValue
+    EqualTo -> eventValue == thresholdValue
+    GreaterThanOrEqualTo -> eventValue >= thresholdValue
+    LessThanOrEqualTo -> eventValue <= thresholdValue
