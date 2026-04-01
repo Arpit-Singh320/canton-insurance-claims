@@ -1,0 +1,78 @@
+-- |
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+--
+
+module OracleEvent where
+
+import DA.Date
+import DA.Time
+
+-- | Represents a data point reported by a trusted oracle.
+-- This contract is created by the oracle and observed by subscribers (e.g., insurers)
+-- who use this data to trigger actions in other contracts, like insurance payouts.
+template OracleEvent
+  with
+    oracle : Party
+      -- ^ The trusted oracle party reporting the event.
+    subscribers : [Party]
+      -- ^ Parties who are subscribed to this event feed, typically insurers.
+    eventId : Text
+      -- ^ A unique identifier for the event, e.g., "FLIGHT-BA2490-2024-08-15".
+    eventDate : Date
+      -- ^ The date on which the event occurred.
+    eventTime : Time
+      -- ^ The time at which the event was recorded by the oracle.
+    eventType : Text
+      -- ^ The type of event, e.g., "FlightDelay", "HurricaneWindSpeed", "DroughtIndex".
+    eventValue : Decimal
+      -- ^ The measured value for the event, which is the parametric trigger.
+    eventUnit : Text
+      -- ^ The unit of measurement for the eventValue, e.g., "Minutes", "MPH", "mm/day".
+  where
+    signatory oracle
+
+    observer subscribers
+
+    key (oracle, eventId) : (Party, Text)
+    maintainer key._1
+
+    ensure
+      eventId /= "" && eventType /= "" && eventUnit /= ""
+
+-- | Example script to demonstrate the creation of an OracleEvent.
+test_OracleEventCreation : Script ()
+test_OracleEventCreation = script do
+  -- Parties
+  oracle <- allocateParty "OracleProvider"
+  insurer <- allocateParty "GlobalInsurance"
+
+  -- Oracle reports a flight delay event
+  let eventTime = time (date 2024 Aug 15) 18 30 00
+  let event = OracleEvent with
+        oracle = oracle
+        subscribers = [insurer]
+        eventId = "FLIGHT-BA2490-2024-08-15"
+        eventDate = date 2024 Aug 15
+        eventTime = eventTime
+        eventType = "FlightDelay"
+        eventValue = 185.0 -- 185 minutes delay
+        eventUnit = "Minutes"
+
+  -- Submit the event to the ledger
+  oracleEventCid <- submit oracle do
+    create event
+
+  -- Verify the contract exists and has the correct data
+  fetchedEvent <- fetch oracleEventCid
+  assert (fetchedEvent == event)
+
+  -- Try to create an event with an empty ID, which should fail the ensure clause
+  submitMustFail oracle do
+    create event with eventId = ""
+
+  -- Test contract key lookup
+  Some fetchedByKey <- queryContractKey @OracleEvent oracle (oracle, "FLIGHT-BA2490-2024-08-15")
+  assert (fetchedByKey == event)
+
+  pure ()
