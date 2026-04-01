@@ -1,0 +1,103 @@
+module InsuranceTest where
+
+import Daml.Script
+import DA.Date (date, Month(..), day, year, fromGregorian)
+import DA.Time (time, Time, addRelTime, days)
+import DA.Assert (assert, assertMsg)
+
+import Policy
+import OracleEvent
+import ClaimProcessor
+import Payout
+
+-- === Test Script ===
+
+testInsuranceLifecycle : Script ()
+testInsuranceLifecycle = script do
+  -- 1. Setup Parties
+  insurer <- allocateParty "Insurer"
+  insured <- allocateParty "Insured"
+  oracle <- allocateParty "Oracle"
+
+  -- 2. Define Policy Parameters
+  let today = date 2024 Feb 28
+  let policyDetails = Policy with
+        insurer = insurer
+        insured = insured
+        policyId = "FLIGHT-DELAY-POLICY-123"
+        premium = 100.0
+        payoutAmount = 1000.0
+        eventMetric = "FlightDelayMinutes"
+        thresholdValue = 180.0 -- Payout if delay is 180 minutes or more
+        startDate = today
+        endDate = addDays today 1
+
+  -- 3. Insurer issues the policy
+  policyCid <- submit insurer do
+    createCmd policyDetails
+
+  -- 4. Insurer sets up the claim processor for this policy
+  processorCid <- submit insurer do
+    createCmd ClaimProcessor with
+      insurer = insurer
+      policyCid = policyCid
+
+  -- === Scenario 1: Event does NOT trigger payout ===
+
+  -- 5. Oracle reports an event below the threshold
+  let eventTime1 = time (fromGregorian 2024 Feb 28) 14 30 0
+  eventBelowThresholdCid <- submit oracle do
+    createCmd OracleEvent with
+      oracle = oracle
+      eventId = "EVENT-001"
+      eventTime = eventTime1
+      metric = "FlightDelayMinutes"
+      observedValue = 120.0 -- 120 < 180, so no payout
+      subscribers = [insurer]
+
+  -- 6. Insurer attempts to process the event, expecting it to fail
+  submitMustFail insurer do
+    exerciseCmd processorCid ProcessEvent with eventCid = eventBelowThresholdCid
+
+  -- 7. Verify that no Payout contract was created
+  payouts1 <- query @Payout insured
+  assertMsg "No payout should exist for below-threshold event" (payouts1 == [])
+
+  -- === Scenario 2: Event DOES trigger payout ===
+
+  -- 8. Oracle reports an event that meets the threshold
+  let eventTime2 = time (fromGregorian 2024 Feb 28) 18 0 0
+  eventAboveThresholdCid <- submit oracle do
+    createCmd OracleEvent with
+      oracle = oracle
+      eventId = "EVENT-002"
+      eventTime = eventTime2
+      metric = "FlightDelayMinutes"
+      observedValue = 210.0 -- 210 >= 180, should trigger payout
+      subscribers = [insurer]
+
+  -- 9. Insurer processes the event, which should automatically create a Payout
+  payoutCid <- submit insurer do
+    exerciseCmd processorCid ProcessEvent with eventCid = eventAboveThresholdCid
+
+  -- 10. Verify that a Payout contract now exists for the insured
+  payouts2 <- query @Payout insured
+  assertMsg "Expected exactly one Payout contract" (length payouts2 == 1)
+  let (fetchedPayoutCid, fetchedPayout) = head payouts2
+  assert (fetchedPayoutCid == payoutCid)
+
+  -- 11. Verify the details of the Payout contract
+  assertMsg "Payout amount is incorrect" (fetchedPayout.amount == policyDetails.payoutAmount)
+  assertMsg "Payout recipient is incorrect" (fetchedPayout.recipient == insured)
+  assertMsg "Payout payer is incorrect" (fetchedPayout.payer == insurer)
+  assertMsg "Payout policy ID is incorrect" (fetchedPayout.policyId == policyDetails.policyId)
+
+  -- 12. Insured acknowledges receipt of the payout
+  submit insured do
+    exerciseCmd payoutCid AcknowledgeReceipt
+
+  -- 13. Verify the Payout contract is archived after acknowledgment
+  payouts3 <- query @Payout insured
+  assertMsg "Payout contract should be archived after acknowledgment" (payouts3 == [])
+
+  pure ()
