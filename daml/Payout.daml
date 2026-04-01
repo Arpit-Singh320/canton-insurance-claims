@@ -1,0 +1,47 @@
+-- |
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+--
+
+module Payout where
+
+import DA.Date
+import DA.Text
+import qualified Policy
+
+-- | Represents a successfully settled and paid insurance claim.
+-- This contract is created by the `ClaimProcessor` upon successful validation
+-- of a triggering event against an active policy. It serves as an immutable,
+-- auditable record of the payout transaction, agreed to by both the insurer
+-- and the policyholder.
+template Payout
+  with
+    insurer : Party
+      -- ^ The insurance company that paid the claim.
+    policyHolder : Party
+      -- ^ The party that received the insurance payout.
+    payoutId : Text
+      -- ^ A unique identifier for this payout transaction.
+    payoutAmount : Decimal
+      -- ^ The amount that was paid out.
+    payoutDate : Date
+      -- ^ The date on which the payout was settled.
+    originalPolicyCid : ContractId Policy.Policy
+      -- ^ The contract ID of the insurance policy that this payout settles.
+    triggeringEventDescription : Text
+      -- ^ A human-readable description of the parametric event that triggered this payout.
+      -- Example: "Hurricane wind speed exceeded 150 mph on 2024-09-10".
+  where
+    signatory insurer, policyHolder
+
+    key (insurer, policyHolder, payoutId) : (Party, Party, Text)
+    maintainer key._1, key._2
+
+    -- | Allows the policyholder to formally acknowledge the payout and archive the
+    -- | record from their active contract set. This is useful for ledger hygiene.
+    choice AcknowledgeAndArchive : ()
+      controller policyHolder
+      do
+        -- This choice archives the Payout contract, effectively confirming
+        -- its finality. No further actions are expected on a Payout.
+        pure ()
