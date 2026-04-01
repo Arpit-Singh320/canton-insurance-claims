@@ -1,0 +1,36 @@
+# Daml artifacts
+.daml/
+*.dar
+daml-script.log
+test-reports/
+
+# Node.js / TypeScript artifacts
+node_modules/
+dist/
+build/
+coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp/
+.pnp.js
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE configuration
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+nbproject/
+atlassian-ide-plugin.xml
+*.swp
+*~
