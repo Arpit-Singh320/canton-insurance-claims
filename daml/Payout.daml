@@ -1,47 +1,39 @@
--- |
 -- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
---
 
-module Payout where
+module Insurance.Payout where
 
-import DA.Date
-import DA.Text
-import qualified Policy
+import DA.Time (Time)
+import Insurance.Policy (Policy)
 
--- | Represents a successfully settled and paid insurance claim.
--- This contract is created by the `ClaimProcessor` upon successful validation
--- of a triggering event against an active policy. It serves as an immutable,
--- auditable record of the payout transaction, agreed to by both the insurer
--- and the policyholder.
+-- | Represents a settled and paid-out insurance claim.
+-- This contract is the final state of a successful automated claims process. It serves as
+-- an immutable, on-ledger receipt of the payout, confirming that the insurer has
+-- fulfilled their obligation to the insured for a specific parametric event.
 template Payout
   with
-    insurer : Party
-      -- ^ The insurance company that paid the claim.
-    policyHolder : Party
-      -- ^ The party that received the insurance payout.
-    payoutId : Text
-      -- ^ A unique identifier for this payout transaction.
-    payoutAmount : Decimal
-      -- ^ The amount that was paid out.
-    payoutDate : Date
-      -- ^ The date on which the payout was settled.
-    originalPolicyCid : ContractId Policy.Policy
-      -- ^ The contract ID of the insurance policy that this payout settles.
-    triggeringEventDescription : Text
-      -- ^ A human-readable description of the parametric event that triggered this payout.
-      -- Example: "Hurricane wind speed exceeded 150 mph on 2024-09-10".
+    insurer: Party
+      -- ^ The insurance provider who made the payment.
+    insured: Party
+      -- ^ The policyholder who received the payment.
+    policyCid: ContractId Policy
+      -- ^ The contract ID of the original `Policy` contract that was settled.
+      -- This provides a clear and auditable link back to the originating agreement.
+    payoutAmount: Decimal
+      -- ^ The amount that was paid out to the insured party, as defined in the policy.
+    settlementTime: Time
+      -- ^ The timestamp when the automatic payout was processed.
+    triggerEventDescription: Text
+      -- ^ A human-readable description of the parametric event that triggered the payout
+      -- (e.g., "Hurricane wind speed measured at 125 mph", "Flight AA123 delayed by 4 hours").
+
   where
-    signatory insurer, policyHolder
+    signatory insurer, insured
 
-    key (insurer, policyHolder, payoutId) : (Party, Party, Text)
-    maintainer key._1, key._2
-
-    -- | Allows the policyholder to formally acknowledge the payout and archive the
-    -- | record from their active contract set. This is useful for ledger hygiene.
-    choice AcknowledgeAndArchive : ()
-      controller policyHolder
+    -- This choice allows both parties to agree to remove the settled Payout record
+    -- from the active contract set. As this contract represents a historical fact,
+    -- it is often kept for audit purposes, but can be archived for ledger hygiene.
+    choice ArchivePayout : ()
+      controller insurer, insured
       do
-        -- This choice archives the Payout contract, effectively confirming
-        -- its finality. No further actions are expected on a Payout.
         pure ()
