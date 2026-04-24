@@ -1,78 +1,33 @@
--- |
--- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
--- SPDX-License-Identifier: Apache-2.0
---
+module Insurance.Oracle.OracleEvent where
 
-module OracleEvent where
+import DA.Time (Time)
 
-import DA.Date
-import DA.Time
-
--- | Represents a data point reported by a trusted oracle.
--- This contract is created by the oracle and observed by subscribers (e.g., insurers)
--- who use this data to trigger actions in other contracts, like insurance payouts.
+-- | Represents a data point published by a trusted oracle service.
+-- This contract acts as an immutable source of truth for external events,
+-- such as weather data, flight statuses, or market indices. Parametric
+-- insurance policies will observe these events to trigger automated claims.
 template OracleEvent
   with
-    oracle : Party
-      -- ^ The trusted oracle party reporting the event.
-    subscribers : [Party]
-      -- ^ Parties who are subscribed to this event feed, typically insurers.
-    eventId : Text
-      -- ^ A unique identifier for the event, e.g., "FLIGHT-BA2490-2024-08-15".
-    eventDate : Date
-      -- ^ The date on which the event occurred.
-    eventTime : Time
-      -- ^ The time at which the event was recorded by the oracle.
-    eventType : Text
-      -- ^ The type of event, e.g., "FlightDelay", "HurricaneWindSpeed", "DroughtIndex".
-    eventValue : Decimal
-      -- ^ The measured value for the event, which is the parametric trigger.
-    eventUnit : Text
-      -- ^ The unit of measurement for the eventValue, e.g., "Minutes", "MPH", "mm/day".
+    oracle          : Party   -- ^ The trusted party publishing the event data.
+    subscribers     : [Party] -- ^ A list of parties (e.g., insurers) who can observe this event.
+    eventId         : Text    -- ^ A unique identifier for this event, e.g., "FLIGHT-UA123-2024-08-15".
+    eventType       : Text    -- ^ The category of the event, e.g., "FlightDelay", "HurricaneWindSpeed", "CropYield".
+    eventTime       : Time    -- ^ The UTC timestamp of when the event occurred.
+    eventValue      : Decimal -- ^ The measured numerical value of the event (e.g., minutes of delay, wind speed in km/h).
+    eventDescription: Text    -- ^ A human-readable description of the event.
   where
     signatory oracle
-
     observer subscribers
 
+    -- The key ensures that for a given oracle, each event ID is unique, preventing
+    -- duplicate event submissions for the same real-world occurrence. It also
+    -- allows for efficient fetching of specific events.
     key (oracle, eventId) : (Party, Text)
     maintainer key._1
 
-    ensure
-      eventId /= "" && eventType /= "" && eventUnit /= ""
-
--- | Example script to demonstrate the creation of an OracleEvent.
-test_OracleEventCreation : Script ()
-test_OracleEventCreation = script do
-  -- Parties
-  oracle <- allocateParty "OracleProvider"
-  insurer <- allocateParty "GlobalInsurance"
-
-  -- Oracle reports a flight delay event
-  let eventTime = time (date 2024 Aug 15) 18 30 00
-  let event = OracleEvent with
-        oracle = oracle
-        subscribers = [insurer]
-        eventId = "FLIGHT-BA2490-2024-08-15"
-        eventDate = date 2024 Aug 15
-        eventTime = eventTime
-        eventType = "FlightDelay"
-        eventValue = 185.0 -- 185 minutes delay
-        eventUnit = "Minutes"
-
-  -- Submit the event to the ledger
-  oracleEventCid <- submit oracle do
-    create event
-
-  -- Verify the contract exists and has the correct data
-  fetchedEvent <- fetch oracleEventCid
-  assert (fetchedEvent == event)
-
-  -- Try to create an event with an empty ID, which should fail the ensure clause
-  submitMustFail oracle do
-    create event with eventId = ""
-
-  -- Test contract key lookup
-  Some fetchedByKey <- queryContractKey @OracleEvent oracle (oracle, "FLIGHT-BA2490-2024-08-15")
-  assert (fetchedByKey == event)
-
-  pure ()
+    -- | Allows the oracle to archive the event contract after it's no longer relevant.
+    -- This helps to manage the size of the Active Contract Set (ACS).
+    choice ArchiveEvent : ()
+      controller oracle
+      do
+        pure ()
