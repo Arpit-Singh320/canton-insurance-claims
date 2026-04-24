@@ -1,103 +1,175 @@
 module InsuranceTest where
 
 import Daml.Script
-import DA.Date (date, Month(..), day, year, fromGregorian)
-import DA.Time (time, Time, addRelTime, days)
-import DA.Assert (assert, assertMsg)
+import DA.Assert
+import Insurance.Policy
 
-import Policy
-import OracleEvent
-import ClaimProcessor
-import Payout
+-- | Main test suite for the parametric insurance workflow.
+insuranceTests = script do
+  -- Setup parties for the scenarios
+  insurer <- allocatePartyWithHint "Insurer" (PartyIdHint "insurer")
+  policyHolder <- allocatePartyWithHint "PolicyHolder" (PartyIdHint "policyholder")
+  oracle <- allocatePartyWithHint "Oracle" (PartyIdHint "oracle")
+  unauthorized <- allocatePartyWithHint "UnauthorizedParty" (PartyIdHint "unauthorized")
 
--- === Test Script ===
+  -- Define a reusable hurricane policy for testing
+  let
+    hurricanePolicyId = "HUR-FL-2024-01"
+    hurricanePremium = 1000.0
+    hurricanePayout = 50000.0
+    -- Trigger payout if sustained wind speed is greater than 150 km/h
+    hurricaneTrigger = Trigger with
+      description = "Sustained Wind Speed > 150 km/h"
+      threshold = 150.0
+      operator = GREATER_THAN
 
-testInsuranceLifecycle : Script ()
-testInsuranceLifecycle = script do
-  -- 1. Setup Parties
-  insurer <- allocateParty "Insurer"
-  insured <- allocateParty "Insured"
-  oracle <- allocateParty "Oracle"
+  -- Test Case 1: The happy path.
+  -- A policy is issued, the parametric threshold is breached, and a payout is created.
+  test "Successful claim payout when threshold is breached" do
+    -- 1. Insurer issues the policy.
+    policyCid <- submit insurer do
+      createCmd Policy with
+        insurer
+        policyHolder
+        oracle
+        policyId = hurricanePolicyId
+        premium = hurricanePremium
+        payoutAmount = hurricanePayout
+        trigger = hurricaneTrigger
+        isPaidOut = False
 
-  -- 2. Define Policy Parameters
-  let today = date 2024 Feb 28
-  let policyDetails = Policy with
-        insurer = insurer
-        insured = insured
-        policyId = "FLIGHT-DELAY-POLICY-123"
-        premium = 100.0
-        payoutAmount = 1000.0
-        eventMetric = "FlightDelayMinutes"
-        thresholdValue = 180.0 -- Payout if delay is 180 minutes or more
-        startDate = today
-        endDate = addDays today 1
+    -- 2. Oracle reports an event that breaches the threshold.
+    let observedWindSpeed = 165.0
+    payoutCidOpt <- submit oracle do
+      exerciseCmd policyCid ReportObservation with observedValue = observedWindSpeed
 
-  -- 3. Insurer issues the policy
-  policyCid <- submit insurer do
-    createCmd policyDetails
+    -- 3. Verify a Payout contract was created for the policyholder.
+    case payoutCidOpt of
+      None -> fail "Expected a Payout contract to be created, but got None."
+      Some payoutCid -> do
+        payout <- queryContractId policyHolder payoutCid
+        payout.payer === insurer
+        payout.receiver === policyHolder
+        payout.amount === hurricanePayout
+        payout.policyId === hurricanePolicyId
 
-  -- 4. Insurer sets up the claim processor for this policy
-  processorCid <- submit insurer do
-    createCmd ClaimProcessor with
-      insurer = insurer
-      policyCid = policyCid
+    -- 4. Verify the policy is now marked as paid out.
+    -- The original contract is archived, and a new one is created in its place.
+    updatedPolicy <- queryContractId insurer policyCid
+    updatedPolicy.isPaidOut === True
+    assertMsg "Policy should be marked as paid out" updatedPolicy.isPaidOut
 
-  -- === Scenario 1: Event does NOT trigger payout ===
+  -- Test Case 2: The non-triggering event path.
+  -- The oracle reports data, but it does not meet the payout threshold.
+  test "No payout when threshold is not breached" do
+    let policyId = "HUR-FL-2024-02"
+    -- 1. Insurer issues a new policy for this test.
+    policyCid <- submit insurer do
+      createCmd Policy with
+        insurer
+        policyHolder
+        oracle
+        policyId
+        premium = hurricanePremium
+        payoutAmount = hurricanePayout
+        trigger = hurricaneTrigger
+        isPaidOut = False
 
-  -- 5. Oracle reports an event below the threshold
-  let eventTime1 = time (fromGregorian 2024 Feb 28) 14 30 0
-  eventBelowThresholdCid <- submit oracle do
-    createCmd OracleEvent with
-      oracle = oracle
-      eventId = "EVENT-001"
-      eventTime = eventTime1
-      metric = "FlightDelayMinutes"
-      observedValue = 120.0 -- 120 < 180, so no payout
-      subscribers = [insurer]
+    -- 2. Oracle reports an event that does NOT breach the threshold.
+    let observedWindSpeed = 140.0
+    payoutCidOpt <- submit oracle do
+      exerciseCmd policyCid ReportObservation with observedValue = observedWindSpeed
 
-  -- 6. Insurer attempts to process the event, expecting it to fail
-  submitMustFail insurer do
-    exerciseCmd processorCid ProcessEvent with eventCid = eventBelowThresholdCid
+    -- 3. Verify that NO Payout contract was created.
+    payoutCidOpt === None
+    (payouts, _) <- query policyHolder
+    assert (null payouts)
 
-  -- 7. Verify that no Payout contract was created
-  payouts1 <- query @Payout insured
-  assertMsg "No payout should exist for below-threshold event" (payouts1 == [])
+    -- 4. Verify the original policy is still active and unpaid.
+    activePolicy <- queryContractId insurer policyCid
+    activePolicy.isPaidOut === False
 
-  -- === Scenario 2: Event DOES trigger payout ===
+  -- Test Case 3: Authorization failure.
+  -- A party other than the designated oracle attempts to trigger the policy.
+  test "Unauthorized party cannot report an observation" do
+    let policyId = "HUR-FL-2024-03"
+    -- 1. Insurer issues a new policy.
+    policyCid <- submit insurer do
+      createCmd Policy with
+        insurer
+        policyHolder
+        oracle
+        policyId
+        premium = hurricanePremium
+        payoutAmount = hurricanePayout
+        trigger = hurricaneTrigger
+        isPaidOut = False
 
-  -- 8. Oracle reports an event that meets the threshold
-  let eventTime2 = time (fromGregorian 2024 Feb 28) 18 0 0
-  eventAboveThresholdCid <- submit oracle do
-    createCmd OracleEvent with
-      oracle = oracle
-      eventId = "EVENT-002"
-      eventTime = eventTime2
-      metric = "FlightDelayMinutes"
-      observedValue = 210.0 -- 210 >= 180, should trigger payout
-      subscribers = [insurer]
+    -- 2. An unauthorized party attempts to report a triggering observation.
+    -- This must fail as they are not the designated oracle for this policy.
+    let observedWindSpeed = 180.0
+    submitMustFail unauthorized do
+      exerciseCmd policyCid ReportObservation with observedValue = observedWindSpeed
 
-  -- 9. Insurer processes the event, which should automatically create a Payout
-  payoutCid <- submit insurer do
-    exerciseCmd processorCid ProcessEvent with eventCid = eventAboveThresholdCid
+  -- Test Case 4: Double-trigger prevention.
+  -- An oracle cannot trigger a payout on a policy that has already been paid.
+  test "Cannot trigger a policy that has already been paid out" do
+    let policyId = "HUR-FL-2024-04"
+    -- 1. Insurer issues a new policy.
+    policyCid <- submit insurer do
+      createCmd Policy with
+        insurer
+        policyHolder
+        oracle
+        policyId
+        premium = hurricanePremium
+        payoutAmount = hurricanePayout
+        trigger = hurricaneTrigger
+        isPaidOut = False
 
-  -- 10. Verify that a Payout contract now exists for the insured
-  payouts2 <- query @Payout insured
-  assertMsg "Expected exactly one Payout contract" (length payouts2 == 1)
-  let (fetchedPayoutCid, fetchedPayout) = head payouts2
-  assert (fetchedPayoutCid == payoutCid)
+    -- 2. Oracle reports a triggering event, which pays out the policy.
+    let firstWindSpeed = 170.0
+    Some _ <- submit oracle do
+      exerciseCmd policyCid ReportObservation with observedValue = firstWindSpeed
 
-  -- 11. Verify the details of the Payout contract
-  assertMsg "Payout amount is incorrect" (fetchedPayout.amount == policyDetails.payoutAmount)
-  assertMsg "Payout recipient is incorrect" (fetchedPayout.recipient == insured)
-  assertMsg "Payout payer is incorrect" (fetchedPayout.payer == insurer)
-  assertMsg "Payout policy ID is incorrect" (fetchedPayout.policyId == policyDetails.policyId)
+    -- 3. Oracle attempts to report another triggering event on the now paid-out policy.
+    -- This must fail because the `isPaidOut` flag is now True.
+    let secondWindSpeed = 175.0
+    submitMustFail oracle do
+      exerciseCmd policyCid ReportObservation with observedValue = secondWindSpeed
 
-  -- 12. Insured acknowledges receipt of the payout
-  submit insured do
-    exerciseCmd payoutCid AcknowledgeReceipt
+  -- Test Case 5: Testing a different trigger operator (LESS_THAN).
+  -- This ensures the logic is not hardcoded for a single operator type.
+  test "Successful payout on a 'LESS_THAN' trigger (e.g., frost)" do
+    let
+      frostPolicyId = "CROP-FR-2024-01"
+      frostPremium = 500.0
+      frostPayout = 10000.0
+      frostTrigger = Trigger with
+        description = "Crop Frost Damage < 2 Celsius"
+        threshold = 2.0
+        operator = LESS_THAN
 
-  -- 13. Verify the Payout contract is archived after acknowledgment
-  payouts3 <- query @Payout insured
-  assertMsg "Payout contract should be archived after acknowledgment" (payouts3 == [])
+    -- 1. Insurer issues a frost insurance policy.
+    policyCid <- submit insurer do
+      createCmd Policy with
+        insurer
+        policyHolder
+        oracle
+        policyId = frostPolicyId
+        premium = frostPremium
+        payoutAmount = frostPayout
+        trigger = frostTrigger
+        isPaidOut = False
 
-  pure ()
+    -- 2. Oracle reports a temperature below the threshold.
+    let observedTemperature = -1.5
+    payoutCidOpt <- submit oracle do
+      exerciseCmd policyCid ReportObservation with observedValue = observedTemperature
+
+    -- 3. Verify that a Payout contract was created.
+    assert (isSome payoutCidOpt) "A payout should have been created for the frost event"
+    let payoutCid = fromSome payoutCidOpt
+    payout <- queryContractId policyHolder payoutCid
+    payout.receiver === policyHolder
+    payout.amount === frostPayout
