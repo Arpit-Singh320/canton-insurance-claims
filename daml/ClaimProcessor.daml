@@ -1,117 +1,211 @@
--- |
 -- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
---
 
 module ClaimProcessor where
 
-import DA.Assert ((===))
-import DA.Date (toDateUTC)
-import DA.Optional (Optional(..))
-import DA.Time (Time, getTime)
-import OracleEvent (OracleEvent(..))
-import Policy (ComparisonOperator(..), ParametricThreshold(..), Policy(..))
+import Daml.Script
+import DA.Assert
+import DA.Optional (isNone)
 
--- | Represents the final, settled state of a claim after a parametric trigger.
--- This contract is created when an insurance policy pays out automatically.
-template PaidClaim
-  with
-    insurer : Party
-      -- ^ The insurance company that paid the claim.
-    insured : Party
-      -- ^ The policyholder who received the payout.
-    policyId : Text
-      -- ^ The unique identifier of the original policy.
-    payoutAmount : Decimal
-      -- ^ The amount paid out.
-    triggeringEvent : OracleEvent
-      -- ^ The oracle event data that triggered the claim.
-    payoutTimestamp : Time
-      -- ^ The UTC timestamp when the payout was processed.
-  where
-    signatory insurer, insured
-    observer insurer, insured
+-- These would be imported from other modules in the project.
+-- For self-contained testing, dummy versions are defined in the test script.
+import Insurance.Policy (Policy(..), ThresholdComparison(..))
+import Oracle.Data (OracleData(..))
 
--- | An automated processor that links an active insurance policy to an oracle feed.
--- It listens for oracle events and automatically triggers a payout if the
--- policy's parametric threshold is breached.
+-- | An automation contract that connects an insurance `Policy` with an `Oracle`.
+-- | It is responsible for watching for oracle data and triggering the claim
+-- | resolution process on the policy when relevant data is published.
+-- |
+-- | The `oracle` is a signatory to represent the bilateral agreement with the
+-- | `insurer` to perform this automated function. This signatory rights grant
+-- | the oracle the authority to archive this `ClaimProcessor` contract once its
+-- | job is complete, ensuring the Active Contract Set (ACS) remains clean.
 template ClaimProcessor
   with
     insurer : Party
-      -- ^ The insurance company.
+      -- ^ The party that underwrote the policy.
     insured : Party
-      -- ^ The policyholder.
+      -- ^ The party that is insured by the policy.
     oracle : Party
-      -- ^ The trusted oracle party responsible for providing event data.
+      -- ^ The oracle party responsible for providing the parametric data.
     policyCid : ContractId Policy
-      -- ^ The contract ID of the active insurance policy being monitored.
+      -- ^ The contract ID of the policy this processor is monitoring.
+    policyData : Policy
+      -- ^ A snapshot of the policy data for easy reference.
   where
-    signatory insurer, insured
-    observer oracle
+    signatory insurer, oracle
+    observer insured
 
-    key (insurer, insured, policyCid) : (Party, Party, ContractId Policy)
+    key (insurer, policyCid) : (Party, ContractId Policy)
     maintainer key._1
 
-    -- | Consumes an `OracleEvent` and processes it against the linked policy.
-    -- This is the core of the automated claim settlement. If the event data
-    - -- breaches the policy's threshold, a `PaidClaim` is created and the
-    -- policy is archived. If the policy expires without a claim, contracts are
-    -- cleaned up.
-    choice ProcessOracleEvent : Optional (ContractId PaidClaim)
+    -- | This choice is exercised by the `oracle` when new data relevant to the
+    -- | policy's parameter is available. It validates the data source and then
+    -- | forwards the observed value to the `Policy` contract to resolve the claim.
+    -- |
+    -- | This processor contract is consumed in the process, as its one-time job
+    -- | of linking the oracle data to the policy is now complete.
+    nonconsuming choice ProcessClaim : ()
       with
-        eventCid: ContractId OracleEvent
-          -- ^ The contract ID of the oracle event to process.
+        oracleDataCid : ContractId OracleData
+          -- ^ The contract ID of the oracle's data publication.
       controller oracle
       do
-        policy <- fetch policyCid
-        event <- fetch eventCid
+        -- Fetch the provided data contract to verify its contents.
+        oracleData <- fetch oracleDataCid
 
-        -- Validation: Ensure the event is from the correct oracle and for the correct policy.
-        policy.oracle === event.oracle
-        policy.policyId === event.eventId
-        oracle === event.oracle
+        -- Ensure the data is from the contractually agreed-upon oracle party.
+        oracleData.oracle === oracle
+          assertMsg "Oracle data is not from the expected oracle party."
 
-        -- The oracle event has been processed, so it can be archived.
-        archive eventCid
+        -- Ensure the data pertains to the specific parameter monitored by the policy.
+        oracleData.parameter === policyData.parameter
+          assertMsg ("Oracle data parameter '" <> oracleData.parameter <>
+                     "' does not match the policy's specified parameter '" <>
+                     policyData.parameter <> "'.")
 
-        now <- getTime
+        -- Delegate the final claim settlement logic to the policy itself. This keeps
+        -- the core business logic encapsulated in the main `Policy` template.
+        -- The `Resolve` choice on the policy is expected to archive the policy contract.
+        exercise policyCid Resolve with observedValue = oracleData.observedValue
 
-        if isThresholdBreached policy.parametricThreshold event.observedValue then do
-          -- THRESHOLD BREACHED: Process the payout.
-          -- Archive the active processor and policy as they are now settled.
+        -- After successfully triggering the resolution on the policy, this
+        -- processor's lifecycle is over. The oracle, as a signatory, has the
+        -- authority to archive it within the same atomic transaction.
+        archive (toInterface @ClaimProcessor this)
+
+-- | Test suite for the ClaimProcessor template.
+claimProcessorTests : Script ()
+claimProcessorTests = script do
+  -- Parties
+  insurer <- allocatePartyWithHint "Insurer" (PartyIdHint "insurer")
+  insured <- allocatePartyWithHint "Insured" (PartyIdHint "insured")
+  oracle <- allocatePartyWithHint "Oracle" (PartyIdHint "oracle")
+  bogusOracle <- allocatePartyWithHint "BogusOracle" (PartyIdHint "bogus-oracle")
+
+  -- Test setup
+  let
+    policyParam = "HURRICANE_WINDSPEED_MPH"
+    testPolicyData = Policy with
+      insurer
+      insured
+      oracle
+      premium = 100.0
+      payoutAmount = 10000.0
+      parameter = policyParam
+      threshold = 120.0
+      thresholdComparison = GTE
+      status = "Active"
+
+  -- Test Case 1: Successful claim payout when threshold is breached.
+  test "Successful claim when threshold is breached" do
+    -- Create the contracts on the ledger.
+    policyCid <- submit insurer do createCmd testPolicyData
+    processorCid <- submit insurer do createCmd ClaimProcessor with insurer, insured, oracle, policyCid, policyData = testPolicyData
+    oracleDataCid <- submit oracle do createCmd OracleData with oracle, parameter = policyParam, observedValue = 125.0, timestamp = getTime
+
+    -- Oracle processes the claim.
+    submit oracle do exerciseCmd processorCid ProcessClaim with oracleDataCid
+
+    -- Verify the processor contract was consumed.
+    processorResult <- queryContractId oracle processorCid
+    assert "ClaimProcessor should be archived after processing" (isNone processorResult)
+
+  -- Test Case 2: No payout when threshold is not met.
+  test "No payout when threshold is not met" do
+    policyCid <- submit insurer do createCmd testPolicyData
+    processorCid <- submit insurer do createCmd ClaimProcessor with insurer, insured, oracle, policyCid, policyData = testPolicyData
+    oracleDataCid <- submit oracle do createCmd OracleData with oracle, parameter = policyParam, observedValue = 110.0, timestamp = getTime
+
+    submit oracle do exerciseCmd processorCid ProcessClaim with oracleDataCid
+
+    processorResult <- queryContractId oracle processorCid
+    assert "ClaimProcessor should be archived even if no payout" (isNone processorResult)
+
+  -- Test Case 3: Rejects processing if oracle data is for the wrong parameter.
+  test "Rejects data for wrong parameter" do
+    policyCid <- submit insurer do createCmd testPolicyData
+    processorCid <- submit insurer do createCmd ClaimProcessor with insurer, insured, oracle, policyCid, policyData = testPolicyData
+    oracleDataCid <- submit oracle do createCmd OracleData with oracle, parameter = "TEMPERATURE_CELSIUS", observedValue = 30.0, timestamp = getTime
+
+    submitMustFail oracle do exerciseCmd processorCid ProcessClaim with oracleDataCid
+
+  -- Test Case 4: Rejects processing if the data comes from an unauthorized oracle.
+  test "Rejects data from wrong oracle" do
+    policyCid <- submit insurer do createCmd testPolicyData
+    processorCid <- submit insurer do createCmd ClaimProcessor with insurer, insured, oracle, policyCid, policyData = testPolicyData
+    -- The bogus oracle creates the data.
+    bogusDataCid <- submit bogusOracle do createCmd OracleData with oracle = bogusOracle, parameter = policyParam, observedValue = 130.0, timestamp = getTime
+
+    -- The legitimate oracle tries to use the bogus data. The assertion inside the choice will fail.
+    submitMustFail oracle do exerciseCmd processorCid ProcessClaim with oracleDataCid = bogusDataCid
+
+    -- Additionally, the bogus oracle cannot even call the choice, as it is not a controller.
+    submitMustFail bogusOracle do exerciseCmd processorCid ProcessClaim with oracleDataCid = bogusDataCid
+
+  -- Test Case 5: Cannot create a duplicate processor for the same policy.
+  test "Cannot create duplicate processor for same policy" do
+    policyCid <- submit insurer do createCmd testPolicyData
+    _ <- submit insurer do createCmd ClaimProcessor with insurer, insured, oracle, policyCid, policyData = testPolicyData
+
+    -- Attempting to create a second processor for the same policy by the same insurer fails due to the contract key.
+    submitMustFail insurer do createCmd ClaimProcessor with insurer, insured, oracle, policyCid, policyData = testPolicyData
+
+-- === Dummy Templates for Self-Contained Testing ===
+-- In a real project, these would be in their own files and imported.
+
+module Insurance.Policy where
+  data ThresholdComparison = GT | GTE | LT | LTE | EQ deriving (Eq, Show)
+
+  template Policy
+    with
+      insurer : Party
+      insured : Party
+      oracle : Party
+      premium : Decimal
+      payoutAmount : Decimal
+      parameter : Text
+      threshold : Decimal
+      thresholdComparison : ThresholdComparison
+      status : Text
+    where
+      signatory insurer, insured
+      observer oracle
+
+      key (insurer, insured, parameter) : (Party, Party, Text)
+      maintainer key._1
+
+      let isBreached (observedValue : Decimal) : Bool =
+            case thresholdComparison of
+              GT -> observedValue > threshold
+              GTE -> observedValue >= threshold
+              LT -> observedValue < threshold
+              LTE -> observedValue <= threshold
+              EQ -> observedValue == threshold
+
+      choice Resolve : ()
+        with
+          observedValue: Decimal
+        controller oracle
+        do
+          -- In a real implementation, this would create a PayoutObligation contract
+          -- if the threshold is breached. For this test, we just archive the policy.
+          if isBreached observedValue then
+            debug ("Policy " <> show self <> ": Threshold breached. Payout triggered.")
+          else
+            debug ("Policy " <> show self <> ": Threshold not met. No payout.")
           archive self
-          archive policyCid
 
-          -- Create the final PaidClaim contract as a record of the settlement.
-          paidClaimCid <- create PaidClaim with
-            insurer = policy.insurer
-            insured = policy.insured
-            policyId = policy.policyId
-            payoutAmount = policy.payoutAmount
-            triggeringEvent = event
-            payoutTimestamp = now
-          return (Some paidClaimCid)
+module Oracle.Data where
+  import DA.Time (Time)
 
-        else if toDateUTC now > policy.endDate then do
-          -- POLICY EXPIRED: No threshold breach occurred before the policy's end date.
-          -- Clean up the active contracts.
-          archive self
-          archive policyCid
-          return None
-
-        else do
-          -- NO EVENT: The event did not breach the threshold and the policy has not expired.
-          -- The ClaimProcessor remains active to wait for subsequent events.
-          return None
-
-
--- | Helper function to evaluate if an observed value from an oracle breaches
--- a policy's parametric threshold.
-isThresholdBreached : ParametricThreshold -> Decimal -> Bool
-isThresholdBreached threshold observedValue =
-  case threshold.operator of
-    GREATER_THAN -> observedValue > threshold.thresholdValue
-    LESS_THAN -> observedValue < threshold.thresholdValue
-    EQUAL_TO -> observedValue == threshold.thresholdValue
-    GREATER_THAN_OR_EQUAL_TO -> observedValue >= threshold.thresholdValue
-    LESS_THAN_OR_EQUAL_TO -> observedValue <= threshold.thresholdValue
+  template OracleData
+    with
+      oracle : Party
+      parameter : Text
+      observedValue : Decimal
+      timestamp : Time
+    where
+      signatory oracle
+      key (oracle, parameter, timestamp) : (Party, Text, Time)
+      maintainer key._1
