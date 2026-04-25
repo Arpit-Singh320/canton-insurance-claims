@@ -1,195 +1,170 @@
-// Copyright (c) 2024 Digital Asset (Canton) Core Team. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+import { ContractId } from "@c7/ledger";
 
-import { DamlContract, CreateCommand, ExerciseCommand, Query } from './types';
+// In a real application, these values would come from a configuration file or environment variables.
+const LEDGER_URL = process.env.REACT_APP_LEDGER_URL || 'http://localhost:7575';
 
-// --- Configuration ---
-// The base URL for the Canton JSON API. Assumes the API is running on port 7575.
-// This can be configured via a .env file in the frontend root (REACT_APP_LEDGER_URL).
-const LEDGER_URL = process.env.REACT_APP_LEDGER_URL || 'http://localhost:7575/v1';
-
-// --- Type Definitions for Daml Templates ---
-// These interfaces should match the structure of your Daml templates.
-// Note: 'Decimal' in Daml is represented as a 'string' in the JSON API.
-
-export interface Policy {
-  insurer: string;
-  insured: string;
-  policyId: string;
-  premium: string;
-  coverageAmount: string;
-  triggerEventDescription: string;
-  triggerThreshold: string;
-  assetIdentifier: string;
-  isActive: boolean;
-  claimProcessor: string;
-}
-
-export interface OracleEventData {
-  oracle: string;
-  subscribers: string[];
-  eventId: string;
-  eventType: string;
-  eventValue: string;
-  eventTime: string;
-  assetIdentifier: string;
-}
-
-export interface ProcessedClaim {
-  claimId: string;
-  policyCid: string; // This is a ContractId, represented as a string
-  insurer: string;
-  insured: string;
-  eventData: OracleEventData;
-  payoutAmount: string;
-  processingTime: string;
-}
-
-export interface PayoutInstruction {
-  payer: string;
-  receiver: string;
-  amount: string;
-  reference: string;
-  settled: boolean;
-}
-
-// --- Generic API Helper ---
+// The package ID is a hash of the compiled Daml code. It can be found in the .daml/dist directory
+// or by using `dpm damlc inspect-dar --json .daml/dist/your-project-version.dar`.
+// It's recommended to set this via an environment variable during the build process.
+const PACKAGE_ID = process.env.REACT_APP_PACKAGE_ID || 'canton-insurance-claims-0.1.0';
 
 /**
- * A generic fetch wrapper for the Canton JSON API to reduce boilerplate.
- * @param endpoint The API endpoint (e.g., 'create', 'exercise', 'query').
- * @param token The JWT token for authentication.
- * @param body The request body for the POST request.
- * @returns The 'result' field from the JSON API response.
- * @throws An error if the network request or the API call fails.
+ * A generic helper function to make authenticated POST requests to the JSON API.
+ * @param endpoint The API endpoint to hit (e.g., '/v1/create').
+ * @param token The JWT for authentication.
+ * @param body The JSON body of the request.
+ * @returns The JSON response from the ledger.
  */
-async function apiFetch(endpoint: 'create' | 'exercise' | 'query', token: string, body: object): Promise<any> {
-  try {
-    const response = await fetch(`${LEDGER_URL}/${endpoint}`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`API request failed with status ${response.status}: ${errorBody}`);
-    }
-
-    const jsonResponse = await response.json();
-    if (jsonResponse.status !== 200) {
-      throw new Error(`JSON API returned non-200 status: ${JSON.stringify(jsonResponse.errors)}`);
-    }
-
-    return jsonResponse.result;
-  } catch (error) {
-    console.error(`Error during API call to '${endpoint}':`, error);
-    throw error;
-  }
-}
-
-// --- Ledger Service Functions ---
-
-/**
- * Creates a new parametric insurance policy on the ledger.
- * @param token The authentication token for the insurer.
- * @param policy The policy data to be stored on the contract.
- * @returns The created policy contract.
- */
-export const createPolicy = async (token: string, policy: Policy): Promise<DamlContract<Policy>> => {
-  const command: CreateCommand<Policy> = {
-    templateId: 'InsurancePolicy:Policy', // Assuming main module is InsurancePolicy
-    payload: policy,
-  };
-  return apiFetch('create', token, command);
-};
-
-/**
- * Fetches all active insurance policies visible to the party associated with the token.
- * @param token The party's authentication token.
- * @returns A list of active policy contracts.
- */
-export const getActivePolicies = async (token: string): Promise<DamlContract<Policy>[]> => {
-  const query: Query = {
-    templateIds: ['InsurancePolicy:Policy'],
-    query: { isActive: true },
-  };
-  return apiFetch('query', token, query);
-};
-
-/**
- * Fetches OracleEventData contracts for a specific asset, visible to the token's party.
- * @param token The authentication token.
- * @param assetIdentifier The unique identifier of the insured asset.
- * @returns A list of relevant oracle event contracts.
- */
-export const getOracleDataForAsset = async (token: string, assetIdentifier: string): Promise<DamlContract<OracleEventData>[]> => {
-    const query: Query = {
-        templateIds: ['OracleEvent:OracleEventData'],
-        query: { assetIdentifier },
-    };
-    return apiFetch('query', token, query);
-}
-
-/**
- * Exercises the choice to process a claim on a policy using specific oracle data.
- * @param token The authentication token of the claim processor party.
- * @param policyCid The ContractId of the InsurancePolicy:Policy contract.
- * @param eventDataCid The ContractId of the OracleEvent:OracleEventData contract to use for processing.
- * @returns The result of the choice exercise, typically the created ProcessedClaim contract.
- */
-export const processClaim = async (token: string, policyCid: string, eventDataCid: string): Promise<any> => {
-  const command: ExerciseCommand = {
-    templateId: 'InsurancePolicy:Policy',
-    contractId: policyCid,
-    choice: 'ProcessClaimWithOracleData', // Assumed choice name in the Policy template
-    argument: {
-      eventDataCid,
+const apiFetch = async (endpoint: string, token: string, body: object) => {
+  const response = await fetch(`${LEDGER_URL}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
     },
-  };
-  return apiFetch('exercise', token, command);
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`API call to ${endpoint} failed with status ${response.status}:`, errorText);
+    throw new Error(`API call failed: ${errorText}`);
+  }
+  return response.json();
+};
+
+// --- Type Definitions ---
+// These types should correspond to the Daml templates in your model.
+// Using a code generator like `dpm codegen-js` is the recommended way to create these in a real project.
+
+export interface PolicyParameters {
+  description: string;
+  triggerType: "Rainfall" | "FlightDelay";
+  triggerThreshold: string; // Daml Decimal
+  payout: string; // Daml Decimal
+}
+
+export interface PolicyProposal {
+  insurer: string; // Daml Party
+  insured: string; // Daml Party
+  operator: string; // Daml Party
+  premium: string; // Daml Decimal
+  currency: string;
+  parameters: PolicyParameters;
+}
+
+export interface Policy extends PolicyProposal {
+  // The active Policy has the same data as the proposal in this model
+}
+
+export interface Claim {
+  insurer: string;
+  insured: string;
+  operator: string;
+  payout: string;
+  currency: string;
+  reason: string;
+  policyCid: ContractId<Policy>;
+}
+
+export interface OracleData {
+  operator: string;
+  dataType: string;
+  value: string; // Daml Decimal (e.g., rainfall in mm or delay in minutes)
+  observationTime: string; // Daml Time
+}
+
+/**
+ * Represents an active contract on the ledger, as returned by the JSON API.
+ */
+export interface ActiveContract<T> {
+  contractId: ContractId<T>;
+  templateId: string;
+  payload: T;
+}
+
+// --- Service Functions ---
+
+/**
+ * Queries the ledger for active contracts of a given template visible to the party.
+ * @param token The JWT of the party performing the query.
+ * @param templateName The template name, e.g., 'Insurance.Policy:Policy'.
+ * @returns A promise that resolves to an array of active contracts.
+ */
+export const queryContracts = async <T>(token: string, templateName: string): Promise<ActiveContract<T>[]> => {
+  const templateId = `${PACKAGE_ID}:${templateName}`;
+  const response = await apiFetch('/v1/query', token, { templateIds: [templateId] });
+  return response.result || [];
 };
 
 /**
- * Fetches all processed claims visible to the party associated with the token.
- * @param token The party's authentication token.
- * @returns A list of processed claim contracts.
+ * Creates a new insurance policy proposal.
+ * @param token The JWT of the insurer.
+ * @param proposal The data for the policy proposal.
+ * @returns The result of the create command from the ledger.
  */
-export const getProcessedClaims = async (token: string): Promise<DamlContract<ProcessedClaim>[]> => {
-  const query: Query = {
-    templateIds: ['ClaimProcessor:ProcessedClaim'],
-  };
-  return apiFetch('query', token, query);
+export const createPolicyProposal = async (token: string, proposal: PolicyProposal): Promise<any> => {
+  return apiFetch('/v1/create', token, {
+    templateId: `${PACKAGE_ID}:Insurance.Policy:PolicyProposal`,
+    payload: proposal,
+  });
 };
 
 /**
- * Fetches all payout instructions visible to the party associated with the token.
- * @param token The party's authentication token.
- * @returns A list of payout instruction contracts.
+ * Accepts a policy proposal, turning it into an active policy.
+ * @param token The JWT of the insured.
+ * @param proposalCid The contract ID of the `PolicyProposal` to accept.
+ * @returns The result of the exercise command.
  */
-export const getPayouts = async (token: string): Promise<DamlContract<PayoutInstruction>[]> => {
-  const query: Query = {
-    templateIds: ['Payout:PayoutInstruction'],
-    query: { settled: false }, // Typically, we only care about unsettled payouts
-  };
-  return apiFetch('query', token, query);
+export const acceptPolicyProposal = async (token: string, proposalCid: ContractId<PolicyProposal>): Promise<any> => {
+  return apiFetch('/v1/exercise', token, {
+    templateId: `${PACKAGE_ID}:Insurance.Policy:PolicyProposal`,
+    contractId: proposalCid,
+    choice: 'Accept',
+    argument: {},
+  });
 };
 
 /**
- * Exercises the choice to mark a payout as settled.
- * @param token The authentication token of the payer (insurer).
- * @param payoutCid The ContractId of the Payout:PayoutInstruction contract.
- * @returns The result of the choice exercise.
+ * Creates an oracle data contract representing an external event.
+ * @param token The JWT of the oracle operator.
+ * @param data The oracle data to be recorded.
+ * @returns The result of the create command.
  */
-export const settlePayout = async (token: string, payoutCid: string): Promise<any> => {
-    const command: ExerciseCommand = {
-      templateId: 'Payout:PayoutInstruction',
-      contractId: payoutCid,
-      choice: 'MarkAsSettled',
-      argument: {},
-    };
-    return apiFetch('exercise', token, command);
-  };
+export const createOracleData = async (token: string, data: OracleData): Promise<any> => {
+  return apiFetch('/v1/create', token, {
+    templateId: `${PACKAGE_ID}:Insurance.Oracle:OracleData`,
+    payload: data,
+  });
+};
+
+/**
+ * Processes an oracle event against an active policy. This may trigger a claim if conditions are met.
+ * @param token The JWT of the operator.
+ * @param policyCid The contract ID of the `Policy`.
+ * @param oracleDataCid The contract ID of the `OracleData` contract for the event.
+ * @returns The result of the exercise command.
+ */
+export const processEvent = async (token: string, policyCid: ContractId<Policy>, oracleDataCid: ContractId<OracleData>): Promise<any> => {
+  return apiFetch('/v1/exercise', token, {
+    templateId: `${PACKAGE_ID}:Insurance.Policy:Policy`,
+    contractId: policyCid,
+    choice: 'ProcessEvent',
+    argument: { oracleDataCid },
+  });
+};
+
+/**
+ * Settles a claim, which would typically involve an off-ledger payment and then archiving the claim contract.
+ * @param token The JWT of the insurer.
+ * @param claimCid The contract ID of the `Claim` to settle.
+ * @returns The result of the exercise command.
+ */
+export const settleClaim = async (token: string, claimCid: ContractId<Claim>): Promise<any> => {
+  return apiFetch('/v1/exercise', token, {
+    templateId: `${PACKAGE_ID}:Insurance.Claim:Claim`,
+    contractId: claimCid,
+    choice: 'Settle',
+    argument: {},
+  });
+};
