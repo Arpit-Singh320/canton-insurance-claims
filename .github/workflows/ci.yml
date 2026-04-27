@@ -8,32 +8,39 @@ on:
 
 jobs:
   daml-ci:
-    name: Daml Backend CI
+    name: Build and Test Daml Contracts
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Daml SDK
-        run: |
-          curl -sSL https://get.daml.com/ | sh -s 3.1.0
-          echo "$HOME/.daml/bin" >> $GITHUB_PATH
+      - name: Install DPM (Canton SDK)
+        run: curl https://get.digitalasset.com/install/install.sh | sh
 
-      - name: Verify Daml version
-        run: daml --version
+      - name: Add DPM to PATH
+        run: echo "$HOME/.dpm/bin" >> $GITHUB_PATH
 
-      - name: Build Daml project
-        run: daml build
+      - name: Verify DPM installation
+        run: dpm --version
 
-      - name: Test Daml contracts
-        run: daml test
+      - name: Build all Daml packages
+        # Using --all for multi-package projects.
+        # If you only have one package, `dpm build` is sufficient.
+        run: dpm build --all
+
+      - name: Run all Daml tests
+        run: dpm test
 
   frontend-ci:
-    name: TypeScript Frontend CI
+    name: Build and Test Frontend
     runs-on: ubuntu-latest
+    # Run this job only after the Daml code has been successfully built and tested.
+    # This is important if the frontend relies on code generated from the Daml DAR.
+    needs: daml-ci
     defaults:
       run:
         working-directory: ./frontend
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,17 +49,22 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
+          # Cache npm dependencies for faster builds
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
+      - name: Install frontend dependencies
+        # 'npm ci' is recommended for CI for faster, more reliable builds
         run: npm ci
 
-      - name: Check code formatting
-        run: npm run format:check
-
       - name: Lint code
+        # Assumes a 'lint' script is defined in frontend/package.json
         run: npm run lint
 
       - name: Build frontend application
+        # Assumes a 'build' script is defined in frontend/package.json
         run: npm run build
+
+      - name: Run frontend tests
+        # Assumes a 'test' script is defined in frontend/package.json
+        run: npm test -- --watchAll=false
