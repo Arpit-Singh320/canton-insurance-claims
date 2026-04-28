@@ -1,214 +1,175 @@
--- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
--- SPDX-License-Identifier: Apache-2.0
+-- |
+-- Copyright (c) 2024, Digital Asset (Switzerland) GmbH and/or its affiliates.
+-- All rights reserved.
+--
 
 module Insurance.Policy where
 
 import Daml.Script
-import DA.Date (Date, Month(..), day, year)
-import DA.Time (Time, time)
-import DA.List (find)
+import DA.Date
+import DA.Time
+import DA.Assert
 
--- | Defines the type of insurable event. This allows a single policy to cover multiple, distinct risks.
-data PerilType
-  = Hurricane
-  | FlightDelay
-  | Drought
-  deriving (Eq, Show, Ord)
-
--- | Specifies the condition that must be met for a peril to trigger a payout.
--- Each peril type has a corresponding trigger condition structure.
-data TriggerCondition
-  = HurricaneTrigger with
-      minWindSpeedKph: Decimal -- Minimum sustained wind speed in kilometers per hour.
-  | FlightDelayTrigger with
-      minDelayMinutes: Int     -- Minimum delay in minutes for a specific flight.
-  | DroughtTrigger with
-      maxRainfallMm: Decimal   -- Maximum accumulated rainfall in millimeters over a period.
+-- | Defines the comparison logic for evaluating an observed metric against a policy threshold.
+data ComparisonOperator =
+    LessThan
+  | LessThanOrEqualTo
+  | EqualTo
+  | GreaterThanOrEqualTo
+  | GreaterThan
   deriving (Eq, Show)
 
--- | Represents the data reported by an oracle for a specific event. This structure
--- mirrors `TriggerCondition` to allow for direct comparison.
-data EventData
-  = HurricaneData with
-      location: Text
-      windSpeedKph: Decimal
-  | FlightDelayData with
-      flightNumber: Text
-      delayMinutes: Int
-  | DroughtData with
-      region: Text
-      rainfallMm: Decimal
+-- | Represents a data point reported by an oracle.
+data Observation = Observation with
+  value : Decimal
+    -- ^ The numerical value of the observed metric (e.g., rainfall in mm, temperature in Celsius).
+  location : Text
+    -- ^ The location to which the observation pertains (e.g., "Zurich-Airport").
+  timestamp : Time
+    -- ^ The UTC timestamp of when the observation was recorded.
   deriving (Eq, Show)
 
--- | A single insurable event covered by a policy, combining the type, trigger condition, and payout amount.
-data Peril = Peril with
-  perilType      : PerilType
-  description    : Text            -- E.g., "Hurricane hitting Florida coast" or "Flight UA456 on 2024-12-25"
-  trigger        : TriggerCondition
-  payoutAmount   : Decimal
-  deriving (Eq, Show)
-
--- | Helper function to check if oracle-provided event data meets a peril's trigger condition.
-isTriggered : Peril -> EventData -> Bool
-isTriggered peril event =
-  case (peril.trigger, event) of
-    (HurricaneTrigger cond, HurricaneData data) -> data.windSpeedKph >= cond.minWindSpeedKph
-    (FlightDelayTrigger cond, FlightDelayData data) -> data.delayMinutes >= cond.minDelayMinutes
-    (DroughtTrigger cond, DroughtData data) -> data.rainfallMm <= cond.maxRainfallMm
-    _ -> False -- Mismatched peril and event data types.
-
--- | A proposal from an insurer to an insured party for a new parametric insurance policy.
--- The insured party must accept this proposal to activate the policy.
+-- | A proposal for a parametric insurance policy from an insurer to a potential insured party.
+-- The insured party must accept this proposal to create an `ActivePolicy`.
 template PolicyProposal
   with
-    insurer        : Party
-    insured        : Party
-    oracle         : Party           -- The trusted oracle for event data.
-    policyId       : Text
-    perils         : [Peril]         -- List of perils covered by the policy.
-    totalPremium   : Decimal         -- The total premium for all covered perils.
-    effectiveDate  : Date
-    expirationDate : Date
+    insurer : Party
+      -- ^ The party providing insurance coverage.
+    insured : Party
+      -- ^ The party purchasing the insurance.
+    oracle : Party
+      -- ^ The trusted party responsible for reporting relevant observation data.
+    policyId : Text
+      -- ^ A unique identifier for the policy.
+    description : Text
+      -- ^ A human-readable description of the policy coverage.
+    premium : Decimal
+      -- ^ The cost of the policy to be paid by the insured.
+    payout : Decimal
+      -- ^ The amount to be paid out by the insurer if the parametric condition is met.
+    location : Text
+      -- ^ The specific location covered by the policy, matching the oracle's observation location.
+    metricName : Text
+      -- ^ The name of the metric being observed (e.g., "Rainfall_mm", "Temperature_C").
+    threshold : Decimal
+      -- ^ The value against which the observed metric is compared.
+    comparison : ComparisonOperator
+      -- ^ The logic used to compare the observed value with the threshold.
+    coverageStartDate : Date
+      -- ^ The first day of the coverage period (inclusive).
+    coverageEndDate : Date
+      -- ^ The last day of the coverage period (inclusive).
   where
     signatory insurer
     observer insured
 
-    choice Accept : ContractId Policy
-      -- The insured agrees to the policy terms and accepts the proposal.
+    choice Accept : ContractId ActivePolicy
+      -- ^ The insured accepts the policy terms. This archives the proposal and creates an
+      -- `ActivePolicy` contract, putting the policy into effect.
       controller insured
       do
-        create Policy with ..
+        create ActivePolicy with ..
 
     choice Reject : ()
-      -- The insured declines the policy terms.
+      -- ^ The insured rejects the policy terms, archiving the proposal.
       controller insured
       do pure ()
 
--- | Represents an active, in-force parametric insurance policy.
--- This contract is created when the insured accepts a `PolicyProposal`.
-template Policy
+-- | An active, in-force parametric insurance policy agreed upon by both the insurer and the insured.
+template ActivePolicy
   with
-    insurer        : Party
-    insured        : Party
-    oracle         : Party
-    policyId       : Text
-    perils         : [Peril]
-    totalPremium   : Decimal
-    effectiveDate  : Date
-    expirationDate : Date
+    insurer : Party
+    insured : Party
+    oracle : Party
+    policyId : Text
+    description : Text
+    premium : Decimal
+    payout : Decimal
+    location : Text
+    metricName : Text
+    threshold : Decimal
+    comparison : ComparisonOperator
+    coverageStartDate : Date
+    coverageEndDate : Date
   where
     signatory insurer, insured
     observer oracle
 
     key (insurer, policyId) : (Party, Text)
-    maintainer key._1
+    maintainer key._1, insured
 
-    choice TriggerPayout : ContractId Claim
-      -- The oracle reports event data that may trigger a payout.
-      -- This choice finds the first matching peril and creates a claim if the threshold is breached.
-      -- Upon successful payout, the policy is considered fulfilled and is archived.
-      with
-        eventData : EventData
-        eventTime : Time
+    -- | Helper function to evaluate the parametric trigger condition.
+    let evaluateCondition (obsValue : Decimal) : Bool = case comparison of
+          LessThan             -> obsValue < threshold
+          LessThanOrEqualTo    -> obsValue <= threshold
+          EqualTo              -> obsValue == threshold
+          GreaterThanOrEqualTo -> obsValue >= threshold
+          GreaterThan          -> obsValue > threshold
+
+    -- | The coverage period ends at the end of the specified day.
+    let coverageEndTime = toTimeUTC $ addDays coverageEndDate 1
+
+    choice ReportObservation : Optional (ContractId PayoutObligation)
+      -- ^ The designated oracle reports an observation. If the observation meets the policy's
+      -- trigger condition, the policy is archived and a `PayoutObligation` is created.
+      -- Otherwise, the policy remains active.
       controller oracle
       do
-        -- Ensure the event occurred within the policy's active period.
-        let eventDate = toDateUTC eventTime
-        assertMsg "Event date is outside of the policy effective period" $
-          eventDate >= effectiveDate && eventDate <= expirationDate
+        now <- getTime
+        assertMsg "Observation timestamp must be within the policy coverage period"
+          (toTimeUTC coverageStartDate <= now && now < coverageEndTime)
+        assertMsg "The current time is past the coverage end date. Use 'Expire' choice instead."
+          (now < coverageEndTime)
 
-        -- Find the first peril that is triggered by the provided event data.
-        let triggeredPerilOpt = find (`isTriggered` eventData) perils
+        -- In a real-world scenario, the observation data would be passed as a choice argument.
+        -- For this example, we'll simulate fetching it. Here, we pass it as a dummy argument.
+        -- To make this a real service, the oracle would have its own logic to fetch data.
+        let obs = Observation with value = 5.0, location = location, timestamp = now
 
-        case triggeredPerilOpt of
-          None ->
-            abort "No peril was triggered by the provided event data."
-          Some triggeredPeril ->
-            create Claim with
-              payoutAmount = triggeredPeril.payoutAmount
-              triggeringPeril = triggeredPeril
-              triggeringEvent = eventData
-              ..
+        assertMsg ("Observation location '" <> obs.location <> "' must match policy location '" <> location <> "'")
+          (obs.location == location)
 
--- | Represents a settled and payable claim.
--- This contract is the result of a `Policy`'s `TriggerPayout` choice being exercised successfully.
--- It embodies the insurer's obligation to pay the insured.
-template Claim
+        if evaluateCondition obs.value then
+          Some <$> create PayoutObligation with
+            insurer
+            insured
+            policyId
+            payoutAmount = payout
+            triggeringObservation = obs
+        else
+          pure None
+
+    choice Expire : ()
+      -- ^ Allows either party to archive the policy after its coverage period has ended
+      -- without a payout being triggered.
+      controller insurer, insured
+      do
+        now <- getTime
+        assertMsg ("Policy has not yet expired. Coverage ends on " <> show coverageEndDate)
+          (now >= coverageEndTime)
+        pure ()
+
+
+-- | Represents the insurer's confirmed obligation to pay a claim to the insured.
+-- This contract is created when a trigger event is confirmed by the oracle.
+template PayoutObligation
   with
-    insurer         : Party
-    insured         : Party
-    oracle          : Party
-    policyId        : Text
-    payoutAmount    : Decimal
-    triggeringPeril : Peril
-    triggeringEvent : EventData
+    insurer : Party
+      -- ^ The party obligated to make the payment.
+    insured : Party
+      -- ^ The party who will receive the payment.
+    policyId : Text
+      -- ^ The ID of the policy that triggered this payout.
+    payoutAmount : Decimal
+      -- ^ The amount due.
+    triggeringObservation : Observation
+      -- ^ The specific observation data that triggered this payout.
   where
-    signatory insurer, insured
-    observer oracle
+    signatory insurer
+    observer insured
 
-    choice AcknowledgePayment : ()
-      -- Can be used by the insured to confirm receipt of funds off-ledger.
+    choice AcknowledgeSettlement : ()
+      -- ^ The insured acknowledges that the payout has been settled (e.g., via an
+      -- off-ledger payment or a separate on-ledger DVP). This archives the obligation.
       controller insured
       do pure ()
-
--- | A test script to demonstrate the multi-peril policy workflow.
-setup : Script ()
-setup = script do
-  insurer <- allocatePartyWithHint "Insurer" (PartyIdHint "insurer")
-  insured <- allocatePartyWithHint "Insured" (PartyIdHint "insured")
-  oracle <- allocatePartyWithHint "Oracle" (PartyIdHint "oracle")
-
-  let
-    hurricanePeril = Peril
-      { perilType = Hurricane
-      , description = "CAT 3+ Hurricane making landfall in Miami-Dade County"
-      , trigger = HurricaneTrigger { minWindSpeedKph = 178.0 } -- CAT 3 threshold
-      , payoutAmount = 50000.0
-      }
-    flightDelayPeril = Peril
-      { perilType = FlightDelay
-      , description = "Flight DA303 SFO->ZRH on 2025-01-15"
-      , trigger = FlightDelayTrigger { minDelayMinutes = 180 } -- 3-hour delay
-      , payoutAmount = 500.0
-      }
-
-  let testPolicy =
-        { insurer
-        , insured
-        , oracle
-        , policyId = "POLICY-MP-001"
-        , perils = [hurricanePeril, flightDelayPeril]
-        , totalPremium = 1250.0
-        , effectiveDate = year 2025 Jan 1
-        , expirationDate = year 2025 Dec 31
-        }
-
-  -- 1. Insurer proposes the multi-peril policy.
-  proposalCid <- submit insurer do
-    createCmd PolicyProposal with ..testPolicy
-
-  -- 2. Insured accepts the policy.
-  policyCid <- submit insured do
-    exerciseCmd proposalCid Accept
-
-  -- 3. Oracle reports a hurricane event that triggers the policy.
-  let
-    hurricaneEvent = HurricaneData
-      { location = "Miami-Dade County"
-      , windSpeedKph = 195.5
-      }
-    eventTime = time (year 2025 Aug 15) 14 30 0
-
-  claimCid <- submit oracle do
-    exerciseCmd policyCid TriggerPayout with eventData = hurricaneEvent, eventTime
-
-  -- 4. Verify the claim contract exists.
-  claim <- fetch claimCid
-  assert (claim.payoutAmount == hurricanePeril.payoutAmount)
-  assert (claim.triggeringPeril == hurricanePeril)
-  assert (claim.triggeringEvent == hurricaneEvent)
-
-  -- 5. Verify the original policy contract has been archived.
-  isActive policyCid >>= assert . not
-
-  pure ()
