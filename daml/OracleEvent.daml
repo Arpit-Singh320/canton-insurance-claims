@@ -1,32 +1,36 @@
-module Insurance.Oracle.OracleEvent where
+module Insurance.Oracle.Event where
 
-import DA.Time (Time)
+import Daml.Trigger (Trigger)
+import DA.Date (Date)
 
--- | Represents a data point published by a trusted oracle service.
--- This contract acts as an immutable source of truth for external events,
--- such as weather data, flight statuses, or market indices. Parametric
--- insurance policies will observe these events to trigger automated claims.
+-- | Represents a data point reported by a trusted oracle.
+-- This contract is created by an oracle and observed by subscribers (e.g., insurers)
+-- who use this data to trigger actions on their own contracts, like insurance policies.
 template OracleEvent
   with
-    oracle          : Party   -- ^ The trusted party publishing the event data.
-    subscribers     : [Party] -- ^ A list of parties (e.g., insurers) who can observe this event.
-    eventId         : Text    -- ^ A unique identifier for this event, e.g., "FLIGHT-UA123-2024-08-15".
-    eventType       : Text    -- ^ The category of the event, e.g., "FlightDelay", "HurricaneWindSpeed", "CropYield".
-    eventTime       : Time    -- ^ The UTC timestamp of when the event occurred.
-    eventValue      : Decimal -- ^ The measured numerical value of the event (e.g., minutes of delay, wind speed in km/h).
-    eventDescription: Text    -- ^ A human-readable description of the event.
+    oracle : Party
+      -- ^ The party acting as the trusted oracle.
+    subscribers : [Party]
+      -- ^ Parties that are subscribed to and can see this event data.
+    eventId : Text
+      -- ^ A unique identifier for the event, e.g., "FLIGHT-UA-245-2024-08-15".
+    eventDate : Date
+      -- ^ The UTC date on which the event occurred.
+    eventValue : Decimal
+      -- ^ The measured value of the event, e.g., rainfall in mm, flight delay in minutes.
+    eventUnit : Text
+      -- ^ The unit of measurement for `eventValue`, e.g., "mm", "minutes", "celsius".
+    description : Text
+      -- ^ A human-readable description of the event.
   where
     signatory oracle
     observer subscribers
 
-    -- The key ensures that for a given oracle, each event ID is unique, preventing
-    -- duplicate event submissions for the same real-world occurrence. It also
-    -- allows for efficient fetching of specific events.
     key (oracle, eventId) : (Party, Text)
     maintainer key._1
 
-    -- | Allows the oracle to archive the event contract after it's no longer relevant.
-    -- This helps to manage the size of the Active Contract Set (ACS).
+    -- | Allows the oracle to archive the event contract once it's no longer needed.
+    -- This helps with ledger hygiene after the event has been processed by all relevant policies.
     choice ArchiveEvent : ()
       controller oracle
       do
