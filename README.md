@@ -1,108 +1,125 @@
 # Canton Parametric Insurance Claims
 
-[![CI](https://github.com/digital-asset/canton-insurance-claims/actions/workflows/ci.yml/badge.svg)](https://github.com/digital-asset/canton-insurance-claims/actions/workflows/ci.yml)
+This project demonstrates a parametric insurance application built on the Canton network using Daml smart contracts. It showcases how to automate insurance claim processing and settlement based on verifiable, real-world data from oracles.
 
-This project demonstrates a parametric insurance application built on the [Canton Network](https://www.canton.network/) using the [Daml](https://www.daml.com/) smart contract language. It automates the insurance claim process by triggering payouts based on objective, verifiable data from an external oracle, eliminating the need for manual claims assessment.
+The application allows an insurer to issue policies that pay out automatically when a specific, measurable event occurs, such as a flight delay or an adverse weather event. This removes the need for a manual claims process, reducing administrative overhead and leading to faster payouts for the insured.
 
-## What is Parametric Insurance?
+## Core Concepts
 
-Parametric (or index-based) insurance is a type of insurance that pays out a pre-agreed amount when a specific, measurable event occurs. Unlike traditional insurance, which compensates for the actual loss incurred, parametric insurance pays out based on a trigger event meeting a certain threshold.
+### What is Parametric Insurance?
 
-**Examples:**
-*   **Flight Insurance:** Pays out if a flight is delayed by more than 2 hours.
-*   **Crop Insurance:** Pays out if rainfall in a region falls below a certain level during the growing season.
-*   **Hurricane Insurance:** Pays out if a hurricane of a specific category makes landfall at a given location.
+Unlike traditional insurance, which pays out based on the magnitude of an assessed loss, parametric insurance pays out a pre-agreed amount when a specific, measurable event (a "parameter") occurs and is verified by a trusted data source (an "oracle").
 
-The key benefit is the speed and transparency of the payout process. Since the trigger is based on objective data from a trusted source (an oracle), claims can be settled automatically and almost instantly, reducing administrative overhead and uncertainty for the policyholder.
+- **Example 1: Flight Delay Insurance.** A policy pays out $200 if a specific flight is delayed by more than 2 hours. The oracle is the airline's official flight status data feed.
+- **Example 2: Crop Insurance.** A policy pays out $10,000 if rainfall in a specific region is less than 50mm during the growing season. The oracle is a national weather service.
 
-## Why Canton and Daml?
+### Why Canton and Daml?
 
-Canton and Daml provide an ideal platform for this use case:
-*   **Privacy:** Canton's privacy model ensures that policy details are only visible to the insurer, the policyholder, and any other designated stakeholders (like the oracle), not the entire network.
-*   **Atomicity:** The entire claim settlement process—from the oracle's trigger to the creation of the payout obligation—can be executed as a single, atomic transaction. This guarantees that the payout occurs if and only if the trigger condition is met.
-*   **Data Integrity:** Daml's strong typing and formal guarantees ensure that the contract logic is executed exactly as written, preventing disputes and errors.
-*   **Interoperability:** Canton is designed for interoperability, allowing for seamless integration with external data sources (oracles) and payment systems (e.g., stablecoins).
+Canton and Daml provide an ideal platform for implementing parametric insurance for several key reasons:
 
-## Project Architecture
+*   **Automation & Efficiency:** Daml smart contracts encode the policy logic directly. When oracle data meets the policy's trigger condition, the claim and payout logic are executed automatically and instantly.
+*   **Privacy by Design:** Canton's privacy model ensures that policy details are strictly confidential. A policy contract is only visible to the insurer and the insured, not to the entire network or competing insurers.
+*   **Atomic Settlement:** The entire workflow—from data submission by the oracle, to claim creation, to payout initiation—can be executed as a single, atomic transaction. This eliminates settlement risk and ensures that payouts occur if and only if the conditions are met.
+*   **Verifiability and Auditability:** All triggering events and contract state changes are immutably recorded on the ledger, creating a transparent and tamper-proof audit trail for regulators and all parties involved.
 
-This project is composed of two main parts:
+## Daml Model Overview
 
-1.  **Daml Model (`/daml`)**: Contains the core smart contract logic defining the insurance workflow.
-    *   `Insurance.Policy`: The central template representing an active insurance policy. It defines the policyholder, insurer, premium, payout amount, and the trigger condition.
-    *   `Insurance.Oracle`: Defines the role of the oracle and provides the mechanism for them to submit trigger data to the ledger.
-    *   `Insurance.Claim`: A contract created automatically when a policy's trigger condition is met, representing the insurer's obligation to pay the policyholder.
+The core logic is captured in a few key Daml templates:
 
-2.  **React Frontend (`/frontend`)**: A web-based user interface for interacting with the smart contracts.
-    *   Built with TypeScript, React, and Vite.
-    *   Uses the `@c7/react` and `@c7/ledger` libraries to communicate with the Canton ledger's JSON API.
-    *   Provides views for the Insurer, Policyholder, and Oracle to manage policies and trigger events.
+*   **`Insurance.Policy.Policy`**: Represents the insurance agreement between the `insurer` and the `insured`. It specifies the premium, payout amount, and the trigger condition (e.g., `flightDelayed = True`). It is signed by both parties.
+*   **`Insurance.Oracle.OracleRequest`**: A contract created by the `insurer` to request data for a specific policy from a trusted `oracle`.
+*   **`Insurance.Policy.TriggeredPolicy`**: When an `oracle` provides data that meets the policy's condition, the `Policy` is consumed and evolves into a `TriggeredPolicy`, which represents an undeniable obligation for the insurer to pay.
+*   **`Insurance.Claims.Claim`**: The final contract in the workflow, representing the settled claim.
 
-## Prerequisites
+## Project Structure
 
-*   **DPM (Daml Package Manager)**: [Installation Guide](https://docs.daml.com/dpm/getting-started/install-dpm.html) (v3.4.0 or later)
-*   **Node.js**: v18 or later
-*   **npm**: v9 or later
+```
+.
+├── .github/workflows/ci.yml # GitHub Actions CI configuration
+├── daml/                      # Daml smart contracts
+│   ├── daml.yaml              # Daml package configuration
+│   └── Insurance/             # Main application module
+│       ├── Claims.daml
+│       ├── Oracle.daml
+│       └── Policy.daml
+│       └── Setup.daml         # Daml Script for test setup
+├── frontend/                  # React TypeScript frontend
+│   ├── public/
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── PolicyView.tsx
+│   │   └── insuranceService.ts
+│   ├── package.json
+│   └── tsconfig.json
+├── .gitignore
+└── README.md
+```
 
 ## Getting Started
 
-Follow these steps to run the application locally.
+Follow these steps to build and run the application locally.
 
-**1. Clone the Repository**
+### Prerequisites
+
+*   [DPM (Canton SDK) v3.4.0 or later](https://www.digitalasset.com/developers)
+*   [Node.js](https://nodejs.org/) v18 or later
+
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/digital-asset/canton-insurance-claims.git
 cd canton-insurance-claims
 ```
 
-**2. Build the Daml Model**
+### 2. Start the Canton Ledger
 
-Compile the Daml smart contracts into a DAR (Daml Archive) file.
-
-```bash
-dpm build
-```
-This will create a file at `.daml/dist/canton-insurance-claims-0.1.0.dar`.
-
-**3. Start the Local Canton Ledger**
-
-Run a local Canton sandbox instance. This also starts the JSON API on port `7575`.
+Open a new terminal window and start the local Canton sandbox environment. This also starts the JSON API on port 7575.
 
 ```bash
 dpm sandbox
 ```
-Keep this process running in a separate terminal window.
 
-**4. Install Frontend Dependencies**
+### 3. Build and Deploy the Daml Contracts
+
+In a separate terminal, build the Daml code into a DAR (Daml Archive).
+
+```bash
+dpm build
+```
+
+This command compiles your Daml code and creates a `.dar` file in the `.daml/dist/` directory.
+
+### 4. Run the Setup Script
+
+To populate the ledger with an Insurer, an Oracle, and a Customer party, along with some sample policies, run the provided Daml Script.
+
+```bash
+dpm damlc script \
+  --dar .daml/dist/canton-insurance-claims-0.1.0.dar \
+  --script-name Insurance.Setup:setup \
+  --ledger-host localhost \
+  --ledger-port 6866
+```
+
+### 5. Install Frontend Dependencies and Run
+
+Finally, navigate to the `frontend` directory, install dependencies, and start the React application.
 
 ```bash
 cd frontend
 npm install
-```
-
-**5. Run the Frontend Application**
-
-```bash
 npm start
 ```
-This will launch the React application, which you can access at `http://localhost:5173`.
 
-## Core Workflow
+The application will now be running at `http://localhost:3000`. You can log in using the parties created by the setup script (e.g., `Insurer`, `Alice`, `Oracle`) to interact with the application from different perspectives.
 
-The application demonstrates the end-to-end lifecycle of a parametric insurance policy.
+## Technology Stack
 
-1.  **Party Login**: The UI simulates a login screen where you can choose to act as the `Insurer`, `Policyholder`, or `Oracle` party.
-2.  **Policy Creation**: The `Insurer` creates a new policy proposal, specifying the `Policyholder`, premium, potential payout, and a trigger condition (e.g., "Wind Speed > 150 km/h").
-3.  **Policy Acceptance**: The `Policyholder` sees the proposal in their dashboard and can choose to accept it. Upon acceptance, the premium is considered paid, and an active `Insurance.Policy` contract is created on the ledger.
-4.  **Oracle Event Trigger**: The `Oracle` party observes a real-world event. They use their dashboard to find the relevant policy and submit the observed data (e.g., "Wind Speed: 165 km/h").
-5.  **Automated Claim Settlement**: The `Policy` contract receives the data from the `Oracle`. It automatically checks if the trigger condition is met.
-    *   If `165 > 150`, the condition is met.
-    *   The `Policy` contract is atomically archived, and a new `Insurance.Claim` contract is created.
-6.  **Payout**: The `Policyholder` now holds an `Insurance.Claim` contract, which is a firm, undeniable obligation from the `Insurer` to pay the settlement amount. The UI shows this claim as ready for payout.
+*   **Ledger:** [Canton](https://www.canton.io/)
+*   **Smart Contracts:** [Daml](https://www.daml.com/)
+*   **Frontend:** [TypeScript](https://www.typescriptlang.org/), [React](https://reactjs.org/), [@c7/react](https://docs.daml.com/canton-ui/react-introduction.html)
+*   **Build/Tooling:** [DPM (Digital Asset Package Manager)](https://www.digitalasset.com/developers)
 
-## Running Tests
+## License
 
-The project includes Daml Script tests to verify the contract logic without needing a UI. To run them:
-
-```bash
-dpm test
-```
+This project is licensed under the [Apache License 2.0](LICENSE).
