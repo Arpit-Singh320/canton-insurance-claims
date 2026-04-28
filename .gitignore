@@ -1,26 +1,22 @@
 # Daml / Canton
 .daml/
-.dpm/
 *.dar
-daml.log
-canton.log
 
-# DPM / Canton Sandbox
-sandbox.db
-sandbox.db-journal
+# DPM
+.dpm/
 
-# Java / Scala build artifacts
-target/
-.bloop/
-.metals/
-
-# Node.js / Frontend
+# Node / Frontend
 node_modules/
+.DS_Store
 dist/
 build/
-.next/
-out/
 coverage/
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+*.iws
 
 # Environment variables
 .env
@@ -29,13 +25,16 @@ coverage/
 .env.test.local
 .env.production.local
 
-# IDE-specific
-.idea/
-.vscode/
-*.iml
-*.iws
-*.ipr
+# Log files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# OS-specific
-.DS_Store
-Thumbs.db
+# Test reports
+junit.xml
+test-report.xml
+lcov-report/
+
+# Other
+target/
